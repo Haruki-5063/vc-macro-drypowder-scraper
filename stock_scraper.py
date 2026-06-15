@@ -7,13 +7,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # =========================================================================
-# ⚙️ 安全第一・低速巡回設定
+# ⚙️ 修正設定：時価総額フィルター（物理テック対応）
 # =========================================================================
 SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 SHEET_NAME = "Master_Watchlist"
 
-MIN_MARKET_CAP = 300_000_000
-MAX_MARKET_CAP = 10_000_000_000
+MIN_MARKET_CAP = 300_000_000        # $300M
+MAX_MARKET_CAP = 10_000_000_000     # $10B
 
 THEME_KEYWORDS = {
     "AI_DataCenter": ["data center", "liquid cooling", "hbm", "optical interconnect"],
@@ -36,7 +36,13 @@ def get_sec_all_tickers():
     try:
         res = requests.get(url, headers=headers)
         data = res.json()
-        return [item["ticker"].upper() for item in data.values() if "." not in item["ticker"] and "-" not in item["ticker"]]
+        
+        # 💡 【最重要修正】 .strip() を追加して、SECデータに含まれる見えない空白を完全に消し去る
+        raw_tickers = [item["ticker"].upper().strip() for item in data.values()]
+        
+        # 不要な記号付き銘柄を排除
+        clean_tickers = [t for t in raw_tickers if "." not in t and "-" not in t]
+        return clean_tickers
     except Exception as e:
         print(f"❌ SECからのティッカーリスト取得に失敗: {e}")
         return []
@@ -53,7 +59,7 @@ def get_or_create_sheet():
         return sh.worksheet(SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(title=SHEET_NAME, rows="2000", cols="6")
-        ws.update('A1', [['Theme', 'Ticker', 'Company_Name', 'Market_Cap_M', 'Business_Summary', 'Last_Updated']])
+        ws.update(range_name='A1', values=[['Theme', 'Ticker', 'Company_Name', 'Market_Cap_M', 'Business_Summary', 'Last_Updated']])
         return ws
 
 def main():
@@ -62,35 +68,40 @@ def main():
         print("📭 SECからのデータが空です。")
         return
         
-    # 🌟 テスト用配列：検証用として、確実にQuantumテーマにヒットする「RGTI」を先頭に固定
-    test_tickers = ["RGTI"] + tickers[:500]
+    # 🌟 テスト用配列：RGTI（検証用）と、最初の50社を結合
+    test_tickers = ["RGTI"] + tickers[:50]
     
-    print(f"🐢 【手動テストモード】先頭の {len(test_tickers)} 社のみを安全に走査します...")
+    print(f"🐢 【完全透過デバッグモード】先頭の {len(test_tickers)} 社をクレンジング済みの値で走査します...")
     discovered_gems = []
     current_date = time.strftime("%Y-%m-%d")
 
     for count, ticker in enumerate(test_tickers, 1):
         try:
-            # 🛠️ 修正：存在しなかった session 引数を完全に排除してエラーを解決
+            # クレンジングされたティッカーでYahooにアクセス
             stock = yf.Ticker(ticker)
             info = stock.info
             
+            # ログのブラックボックス化を防ぐため、1社ごとにステータスを明示出力
+            company_name = info.get("longName", ticker)
             market_cap = info.get("marketCap", 0)
-            summary = info.get("longBusinessSummary", "").lower()
+            
+            # 1. 時価総額の判定
+            if not (MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP):
+                print(f" ✖️ [{ticker}] スキップ: 時価総額が対象外 (${market_cap/1e6:.1f}M)")
+                time.sleep(0.5)
+                continue
+                
+            summary = info.get("longBusinessSummary", "")
             if not summary:
+                print(f" ✖️ [{ticker}] スキップ: 事業概要テキストが空です")
                 time.sleep(0.5)
                 continue
             
-            # 🛠️ 修正：テスト時は時価総額フィルターを緩め、書き込みロジックの開通確認を最優先する
-            if ticker != "RGTI":
-                if not (MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP):
-                    time.sleep(0.5)
-                    continue
-            
             # 2. 12テーマの走査
             matched_theme = None
+            summary_lower = summary.lower()
             for theme, keywords in THEME_KEYWORDS.items():
-                if any(kw in summary for kw in keywords):
+                if any(kw in summary_lower for kw in keywords):
                     matched_theme = theme
                     break
             
@@ -99,17 +110,19 @@ def main():
                 discovered_gems.append([
                     matched_theme,
                     ticker,
-                    info.get("longName", ticker),
+                    company_name,
                     round(market_cap / 1_000_000, 2),
-                    info.get("longBusinessSummary", ""),
+                    summary,
                     current_date
                 ])
+            else:
+                print(f" 💤 [{ticker}] スキップ: 国策キーワードに該当なし")
             
             time.sleep(1.0)
             
         except Exception as e:
-            # 🛠️ 修正：予期せぬエラーが起きた場合は、ログに原因を出力するように変更
-            print(f"⚠️ {ticker} の走査中にエラーが発生: {e}")
+            # 404などのエラーが出た場合は、絶対に隠蔽せず理由を出力
+            print(f" 🚨 [{ticker}] 通信または解析エラー: {e}")
             time.sleep(1.0)
             continue
 
@@ -117,11 +130,11 @@ def main():
     if len(discovered_gems) > 0:
         ws = get_or_create_sheet()
         ws.clear()
-        ws.update('A1', [['Theme', 'Ticker', 'Company_Name', 'Market_Cap_M', 'Business_Summary', 'Last_Updated']])
+        ws.update(range_name='A1', values=[['Theme', 'Ticker', 'Company_Name', 'Market_Cap_M', 'Business_Summary', 'Last_Updated']])
         ws.append_rows(discovered_gems)
-        print(f"🎉 成功！テストをクリアし、{len(discovered_gems)} 件の原石をスプレッドシートへ格納しました。")
+        print(f"🎉 成功！{len(discovered_gems)} 件の原石をスプレッドシートへ格納しました。")
     else:
-        print("📭 テスト対象の銘柄からテーマに合致するものが検出されませんでした。")
+        print("📭 条件に合致する銘柄が検出されませんでした。")
 
 if __name__ == "__main__":
     main()
