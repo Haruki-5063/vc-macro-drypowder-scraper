@@ -12,8 +12,8 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 SHEET_NAME = "Master_Watchlist"
 
-MIN_MARKET_CAP = 100_000_000      # $100M
-MAX_MARKET_CAP = 1_500_000_000    # $1.5B
+MIN_MARKET_CAP = 300_000_000        # $300M (足切りライン)
+MAX_MARKET_CAP = 10_000_000_000   　# $10B
 
 THEME_KEYWORDS = {
     "AI_DataCenter": ["data center", "liquid cooling", "hbm", "optical interconnect"],
@@ -63,7 +63,7 @@ def main():
         return
         
     # 🌟 テスト用配列：検証用として、確実にQuantumテーマにヒットする「RGTI」を先頭に固定
-    test_tickers = ["RGTI"] + tickers[:20]
+    test_tickers = ["RGTI"] + tickers[:500]
     
     print(f"🐢 【手動テストモード】先頭の {len(test_tickers)} 社のみを安全に走査します...")
     discovered_gems = []
