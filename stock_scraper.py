@@ -69,7 +69,7 @@ def main():
         return
         
     # 🌟 テスト用配列：RGTI（検証用）と、最初の50社を結合
-    test_tickers = ["RGTI"] + tickers[:50]
+    test_tickers = ["RGTI"] + tickers[:500]
     
     print(f"🐢 【完全透過デバッグモード】先頭の {len(test_tickers)} 社をクレンジング済みの値で走査します...")
     discovered_gems = []
