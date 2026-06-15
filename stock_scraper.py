@@ -6,7 +6,7 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-SPREADSHEET_ID = "あなたのスプレッドシートID"
+SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 SHEET_NAME = "Master_Watchlist"
 
 MIN_MARKET_CAP = 100_000_000
