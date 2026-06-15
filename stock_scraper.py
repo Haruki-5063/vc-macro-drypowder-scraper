@@ -18,7 +18,7 @@ MIN_MARKET_CAP = 100_000_000      # $100M
 MAX_MARKET_CAP = 1_500_000_000    # $1.5B
 
 # 並列実行するスレッド数（GitHub Actionsの環境下で最も効率が良い20スレッドを採用）
-MAX_WORKERS = 20
+MAX_WORKERS = 10
 
 # 📡 12の国策テーマと検索キーワード（小文字で判定）
 THEME_KEYWORDS = {
