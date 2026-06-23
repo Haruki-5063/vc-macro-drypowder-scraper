@@ -2,7 +2,7 @@ import os
 import json
 import time
 import re
-import math  # 🌟 mathモジュールを正しくインポート
+import math
 import unicodedata
 import requests
 import yfinance as yf
@@ -19,9 +19,13 @@ SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 MASTER_SHEET_NAME = "Master_Watchlist"
 ELITE_SHEET_NAME = "Elite_Watchlist"
 
+# SEC EDGARアクセス用の正規ヘッダー
 SEC_HEADERS = {
     'User-Agent': 'CorporateAnalystResearch/1.0 (analyst_data@example.com)'
 }
+
+# CIKマッピング用のグローバルキャッシュ
+_TICKER_TO_CIK_MAP = None
 
 def get_google_sheets_client():
     secret_json = os.environ.get("GCP_SERVICE_ACCOUNT_KEY")
@@ -42,6 +46,30 @@ def get_quarter_label(timestamp):
         return f"{year}_{quarter}"
     except Exception:
         return None
+
+# =========================================================================
+# 🎯 【SEC CIK 変換エンジン】
+# =========================================================================
+def load_sec_cik_map():
+    """SEC公式からTicker->CIKのコンバージョン表を一度だけロードしてキャッシュ"""
+    global _TICKER_TO_CIK_MAP
+    if _TICKER_TO_CIK_MAP is not None:
+        return _TICKER_TO_CIK_MAP
+        
+    _TICKER_TO_CIK_MAP = {}
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        res = requests.get(url, headers=SEC_HEADERS)
+        if res.status_code == 200:
+            data = res.json()
+            for item in data.values():
+                ticker_upper = str(item['ticker']).upper()
+                _TICKER_TO_CIK_MAP[ticker_upper] = str(item['cik_str']).zfill(10)
+        else:
+            print(f" 🚨 SEC Tickerマップ取得失敗: HTTP {res.status_code}")
+    except Exception as e:
+        print(f" 🚨 CIKマップ初期化エラー: {e}")
+    return _TICKER_TO_CIK_MAP
 
 # =========================================================================
 # 🧹 【最強前処理 ＆ 10-Q/10-K 索敵モジュール】
@@ -102,13 +130,22 @@ def extract_target_section(clean_text: str, keywords: list, window: int = 12000)
     return "\n\n--- [セクション区切り] ---\n\n".join(extracted_sections)
 
 def fetch_sec_clean_context(ticker: str) -> str:
-    cik_padded = str(ticker).zfill(10)
+    """
+    TickerをCIKに正規変換 ➔ 10-Q/10-Kをクローリング
+    """
+    cik_map = load_sec_cik_map()
+    cik_padded = cik_map.get(str(ticker).upper())
+    
+    if not cik_padded:
+        print(f" 🚨 CIKが見つかりません (Ticker: {ticker})")
+        return ""
+        
     api_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
     
     try:
         res = requests.get(api_url, headers=SEC_HEADERS)
         if res.status_code != 200:
-            print(f" 🚨 SEC APIアクセス失敗 ({ticker}): HTTP {res.status_code}")
+            print(f" 🚨 SEC APIアクセス失敗 ({ticker} / CIK: {cik_padded}): HTTP {res.status_code}")
             return ""
             
         submission_data = res.json()
@@ -127,7 +164,9 @@ def fetch_sec_clean_context(ticker: str) -> str:
         acc_num_clean = acc_num.replace('-', '')
         doc_name = recent_filings['primaryDocument'][target_index]
         
-        doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(ticker)}/{acc_num_clean}/{doc_name}"
+        # CIKの先頭ゼロを外した整数値をURLに組み込む必要あり
+        cik_int = int(cik_padded)
+        doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_num_clean}/{doc_name}"
         
         html_res = requests.get(doc_url, headers=SEC_HEADERS)
         if html_res.status_code != 200:
@@ -143,7 +182,8 @@ def fetch_sec_clean_context(ticker: str) -> str:
         final_context = extract_target_section(cleaned_all_text, backlog_keywords, window=12000)
         return final_context
         
-    except Exception:
+    except Exception as e:
+        print(f" 🚨 SECクローリング例外 ({ticker}): {e}")
         return ""
 
 # =========================================================================
@@ -212,7 +252,7 @@ def main():
     all_master_records = master_ws.get_all_records()
     
     master_records = all_master_records[:10]
-    print(f"🧪 財務エラー修正テストモード：先頭 {len(master_records)} 銘柄を処理します。")
+    print(f"🧪 完全統合デバッグモード：先頭 {len(master_records)} 銘柄を処理します。")
     
     try:
         elite_ws = sh.worksheet(ELITE_SHEET_NAME)
@@ -225,7 +265,7 @@ def main():
     existing_source_map = {r['Ticker']: r.get('Backlog_Source_Text', 'N/A') for r in elite_data if 'Ticker' in r}
 
     # =========================================================================
-    # 🌟 1パス目：動的クォーター検出
+    # 🌟 1パス目：動的クォーター検出 ➔ 最新3期に冷酷に制限
     # =========================================================================
     print("🔄 1パス目：決算タイムスタンプをスキャン中...")
     detected_quarters = set()
@@ -241,19 +281,20 @@ def main():
             
             stock_raw_financials[ticker] = (stock, q_financials, q_balance)
             
-            # 表記ブレ吸収のための緩いインデックス探索
             rev_idx = [i for i in q_financials.index if "Revenue" in i]
             if rev_idx:
                 timestamps = q_financials.loc[rev_idx[0]].dropna().index
                 for ts in timestamps[:3]:
                     lbl = get_quarter_label(ts)
                     if lbl: detected_quarters.add(lbl)
-            time.sleep(0.5)
+            time.sleep(0.3)
         except Exception:
             continue
 
-    sorted_quarters = sorted(list(detected_quarters))
-    print(f"📈 検出されたクォーター列: {sorted_quarters}")
+    # 🌟【改善】横に無駄に伸びないよう、検出された中から降順で最新3期のみを厳選
+    sorted_quarters = sorted(list(detected_quarters), reverse=True)[:3]
+    sorted_quarters.reverse() # 時系列順（古い順）に並び替え
+    print(f"📈 厳選された最新3クォーター列: {sorted_quarters}")
 
     # =========================================================================
     # 🌟 2パス目：マッピング
@@ -273,27 +314,27 @@ def main():
         
         stock, q_financials, q_balance = stock_raw_financials[ticker]
         
-        # AI記憶再利用判定
+        # AI記憶再利用
         has_past_data = ticker in existing_vc_map and existing_vc_map[ticker] != "" and "4_General" not in existing_vc_map[ticker]
         if has_past_data:
             vc_layer = existing_vc_map[ticker]
             backlog_val = existing_backlog_map.get(ticker, "N/A")
             backlog_source = existing_source_map.get(ticker, "N/A")
         else:
+            print(f" ➔ 📡 {ticker}: 10-Q/10-K を正規索敵中...")
             sec_text = fetch_sec_clean_context(ticker)
             ai_res = ask_gemini_sec_analysis(ticker, item.get("Business_Summary", ""), sec_text)
             
             vc_layer = ai_res.get("Value_Chain", "4_General")
             backlog_val = ai_res.get("backlog", "N/A")
             backlog_source = ai_res.get("backlog_source_text", "N/A")
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         # 財務計算
         try:
             history = stock.history(period="30d")
             volume_ratio = round(history['Volume'].iloc[-1] / history['Volume'].mean(), 2) if len(history) >= 2 else 1.0
             
-            # インデックスの表記ブレ吸収用ロジック
             rev_idx = [i for i in q_financials.index if "Revenue" in i]
             rd_idx = [i for i in q_financials.index if "Research" in i or "R&D" in i]
             net_inc_idx = [i for i in q_financials.index if "Net Income" in i]
@@ -311,26 +352,30 @@ def main():
                         val = yoy_series.iloc[i]
                         q_lbl = get_quarter_label(timestamps[i])
                         col_key = f"Rev_YoY_{q_lbl}"
-                        if col_key in ticker_q_values and not math.isnan(val):  # 🌟 math.isnan に修正
+                        if col_key in ticker_q_values and not math.isnan(val):
                             ticker_q_values[col_key] = f"{round(val * 100, 1)}%"
 
-            rd_ratio_str, cash_runway = "N/A", "N/A"
-            if rev_idx and rd_idx:
+            # 🌟【改善】R&D項目の有無で、エラーと開示なしを冷酷に区別
+            rd_ratio_str = "NO_R&D(開示なし)"
+            if rev_idx:
                 latest_rev = q_financials.loc[rev_idx[0]].iloc[0]
-                latest_rd = q_financials.loc[rd_idx[0]].iloc[0]
-                if latest_rev > 0 and not math.isnan(latest_rd):  # 🌟 math.isnan に修正
-                    rd_ratio_str = f"{round((abs(latest_rd) / latest_rev) * 100, 1)}%"
+                if rd_idx:
+                    latest_rd = q_financials.loc[rd_idx[0]].iloc[0]
+                    if latest_rev > 0 and not math.isnan(latest_rd):
+                        rd_ratio_str = f"{round((abs(latest_rd) / latest_rev) * 100, 1)}%"
+                else:
+                    rd_ratio_str = "NO_R&D"
 
+            cash_runway = "N/A"
             if cash_idx and net_inc_idx:
                 latest_cash = q_balance.loc[cash_idx[0]].iloc[0]
                 latest_loss = q_financials.loc[net_inc_idx[0]].iloc[0]
-                if latest_loss < 0 and not math.isnan(latest_cash):  # 🌟 math.isnan に修正
+                if latest_loss < 0 and not math.isnan(latest_cash):
                     cash_runway = f"{round(abs(latest_cash) / abs(latest_loss), 1)} Q"
                 elif latest_loss >= 0:
                     cash_runway = "Black (黒字)"
-        except Exception as e:
-            print(f"❌ [{ticker}] 計算処理スキップ（インデックス不適合等）: {e}")
-            volume_ratio, rd_ratio_str, cash_runway = 1.0, "N/A", "N/A"
+        except Exception:
+            volume_ratio, rd_ratio_str, cash_runway = 1.0, "Calc_Error", "Calc_Error"
             ticker_q_values = {f"Rev_YoY_{q}": "" for q in sorted_quarters}
 
         # 行データの組み立て
@@ -342,7 +387,7 @@ def main():
             rd_ratio_str, cash_runway, backlog_val, backlog_source, current_date
         ]
         updated_elite_rows.append(row)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     # 3. シートへの最終書き込み
     try:
@@ -354,7 +399,7 @@ def main():
     elite_ws.update(range_name='A1', values=[final_headers])
     if updated_elite_rows:
         elite_ws.append_rows(updated_elite_rows)
-    print("🎉 財務計算クラッシュ修正版の実行が完了しました。")
+    print("🎉 SEC APIの紐付け成功 ＆ 財務表示の最適化版が正常終了しました！")
 
 if __name__ == "__main__":
     main()
