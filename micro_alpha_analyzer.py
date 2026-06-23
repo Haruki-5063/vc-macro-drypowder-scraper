@@ -182,4 +182,196 @@ def ask_gemini_sec_analysis(ticker, summary, sec_text):
 {input_context}
 
 【1. Value_Chain 分類ルール】
-企業のコア事業概要 (yfinance) の文脈から、以下の3つのいずれかに【直接的かつ明らかな根拠】
+企業のコア事業概要 (yfinance) の文脈から、以下の3つのいずれかに【直接的かつ明らかな根拠】がある場合のみ分類してください。
+- "1_Upstream"：核燃料、ウラニウムや重要鉱物の採掘・精錬、基礎素材、または物理的なコア基盤技術を直接提供・供給している。
+- "2_Midstream"：ハードウェアコンポーネント、産業用装置（タービン、変圧器、半導体製造装置など）、衛星ペイロードなどの製造・開発を行っている。
+- "3_Downstream"：エンドユーザー向けサービス、電力網の運用・ユーティリティ、SaaS・ソフトウェアプラットフォームの提供、システムインテグレーションを行っている。
+
+★重要：上記に明らかな根拠がない場合、または複数のレイヤーにまたがっていて判定が曖昧な場合は、絶対に無理に推測せず "4_General" と出力してください。
+
+【2. Backlog Amount 抽出ルール】
+SEC 10-Q/10-Kのテキストから、以下のキーワード群（表記ブレ）に該当する、直近の「最新の総額（金額）」を特定してください。
+[対象キーワード: "backlog", "Remaining Performance Obligations", "RPO", "contract backlog", "unfunded backlog"]
+
+★厳格な抽出ルール：
+1. 過去（前年同期や前四半期）の数値ではなく、必ず「直近（As of [Latest Date]）」の数値を採用すること。
+2. テキスト内に具体的な金額（例: $125M, $1.2B）の記載が【直接的】にある場合のみ抽出すること。
+3. 抽出した金額（例: $120M）を "backlog" に格納し、その金額が書かれていた箇所の生テキスト（前後1文を含む実際の文章）を丸ごと "backlog_source_text" に格納してください。
+4. 該当する記載が一切ない、または文脈から判断がつかない場合は、見栄を張らずに "backlog": "N/A", "backlog_source_text": "N/A" と出力してください。
+
+[Strict Constraints]
+- Output ONLY a valid JSON object matching this schema exactly. Do not embed inside markdown wrappers:
+{{"Value_Chain": "...", "backlog": "...", "backlog_source_text": "..."}}
+"""
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", 
+                temperature=0.0
+            ),
+        )
+        return json.loads(response.text)
+    except Exception:
+        return default_res
+
+# =========================================================================
+# 🚀 【メインプロセッサ】
+# =========================================================================
+def main():
+    gc = get_google_sheets_client()
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    
+    # 1. データの事前読込
+    master_ws = sh.worksheet(MASTER_SHEET_NAME)
+    all_master_records = master_ws.get_all_records()
+    
+    # 🌟【テスト用制限】最初の10件のみに対象を冷酷にスライス
+    master_records = all_master_records[:10]
+    print(f"🧪 テストモード起動：Master内の全{len(all_master_records)}銘柄中、先頭の {len(master_records)} 銘柄のみを処理します。")
+    
+    try:
+        elite_ws = sh.worksheet(ELITE_SHEET_NAME)
+        elite_data = elite_ws.get_all_records()
+    except gspread.exceptions.WorksheetNotFound:
+        elite_data = []
+
+    existing_vc_map = {r['Ticker']: r['Value_Chain'] for r in elite_data if 'Ticker' in r}
+    existing_backlog_map = {r['Ticker']: r['Backlog_Amount'] for r in elite_data if 'Ticker' in r}
+    existing_source_map = {r['Ticker']: r.get('Backlog_Source_Text', 'N/A') for r in elite_data if 'Ticker' in r}
+
+    # =========================================================================
+    # 🌟 1パス目：全銘柄を巡回して「存在する全クォーター名」を冷酷に洗い出す
+    # =========================================================================
+    print("🔄 1パス目：テスト銘柄の決算タイムスタンプをスキャン中...")
+    detected_quarters = set()
+    stock_raw_financials = {}
+    
+    for item in master_records:
+        ticker = item.get("Ticker")
+        if not ticker: continue
+        try:
+            stock = yf.Ticker(ticker)
+            q_financials = stock.quarterly_financials
+            q_balance = stock.quarterly_balance_sheet
+            
+            stock_raw_financials[ticker] = (stock, q_financials, q_balance)
+            
+            rev_idx = [i for i in q_financials.index if "Revenue" in i]
+            if rev_idx:
+                timestamps = q_financials.loc[rev_idx[0]].dropna().index
+                for ts in timestamps[:3]:
+                    lbl = get_quarter_label(ts)
+                    if lbl: detected_quarters.add(lbl)
+            time.sleep(0.5)
+        except Exception:
+            continue
+
+    sorted_quarters = sorted(list(detected_quarters))
+    print(f"📈 検出されたクォーター列: {sorted_quarters}")
+
+    # =========================================================================
+    # 🌟 2パス目：動的なヘッダー構造を確定させて、マッピングを実行
+    # =========================================================================
+    base_headers = ['Theme', 'Ticker', 'Company_Name', 'Value_Chain', 'Market_Cap_M', 'Volume_Ratio']
+    tail_headers = ['RD_Ratio', 'Cash_Runway', 'Backlog_Amount', 'Backlog_Source_Text', 'Last_Updated']
+    
+    final_headers = base_headers + [f"Rev_YoY_{q}" for q in sorted_quarters] + tail_headers
+    
+    updated_elite_rows = []
+    current_date = time.strftime("%Y-%m-%d")
+    
+    print("🔄 2パス目：詳細データのマッピングとGemini解析を実行中...")
+    for item in master_records:
+        ticker = item.get("Ticker")
+        if not ticker or ticker not in stock_raw_financials: continue
+        
+        stock, q_financials, q_balance = stock_raw_financials[ticker]
+        
+        # AI記憶の再利用判定（防衛ライン）
+        has_past_data = ticker in existing_vc_map and existing_vc_map[ticker] != "" and "4_General" not in existing_vc_map[ticker]
+        if has_past_data:
+            vc_layer = existing_vc_map[ticker]
+            backlog_val = existing_backlog_map.get(ticker, "N/A")
+            backlog_source = existing_source_map.get(ticker, "N/A")
+            print(f" ➔ {ticker}: 既存のAI解析結果を再利用（API消費ゼロ）")
+        else:
+            print(f" ➔ 💡 {ticker}: 新規マイニング発動。10-Q/10-Kをクローリング中...")
+            sec_text = fetch_sec_clean_context(ticker)
+            ai_res = ask_gemini_sec_analysis(ticker, item.get("Business_Summary", ""), sec_text)
+            
+            vc_layer = ai_res.get("Value_Chain", "4_General")
+            backlog_val = ai_res.get("backlog", "N/A")
+            backlog_source = ai_res.get("backlog_source_text", "N/A")
+            print(f" ➔ Gemini確定 [VC: {vc_layer} | Backlog: {backlog_val}]")
+            time.sleep(0.5)
+
+        # 財務計算
+        try:
+            history = stock.history(period="30d")
+            volume_ratio = round(history['Volume'].iloc[-1] / history['Volume'].mean(), 2) if len(history) >= 2 else 1.0
+            
+            rev_idx = [i for i in q_financials.index if "Revenue" in i]
+            rd_idx = [i for i in q_financials.index if "Research" in i or "R&D" in i]
+            net_inc_idx = [i for i in q_financials.index if "Net Income" in i]
+            cash_idx = [i for i in q_balance.index if "Cash And Cash Equivalents" in i or "Cash" in i]
+            
+            ticker_q_values = {f"Rev_YoY_{q}": "" for q in sorted_quarters}
+            
+            if rev_idx:
+                rev_data = q_financials.loc[rev_idx[0]].dropna()
+                timestamps = rev_data.index
+                rev_series = rev_data.iloc[::-1]
+                if len(rev_series) >= 5:
+                    yoy_series = rev_series.pct_change(periods=4).iloc[::-1]
+                    for i in range(min(3, len(yoy_series))):
+                        val = yoy_series.iloc[i]
+                        q_lbl = get_quarter_label(timestamps[i])
+                        col_key = f"Rev_YoY_{q_lbl}"
+                        if col_key in ticker_q_values and not os.sys.math.isnan(val):
+                            ticker_q_values[col_key] = f"{round(val * 100, 1)}%"
+
+            rd_ratio_str, cash_runway = "N/A", "N/A"
+            if rev_idx and rd_idx:
+                latest_rev = q_financials.loc[rev_idx[0]].iloc[0]
+                latest_rd = q_financials.loc[rd_idx[0]].iloc[0]
+                if latest_rev > 0 and not os.sys.math.isnan(latest_rd):
+                    rd_ratio_str = f"{round((abs(latest_rd) / latest_rev) * 100, 1)}%"
+
+            if cash_idx and net_inc_idx:
+                latest_cash = q_balance.loc[cash_idx[0]].iloc[0]
+                latest_loss = q_financials.loc[net_inc_idx[0]].iloc[0]
+                if latest_loss < 0 and not os.sys.math.isnan(latest_cash):
+                    cash_runway = f"{round(abs(latest_cash) / abs(latest_loss), 1)} Q"
+                elif latest_loss >= 0:
+                    cash_runway = "Black (黒字)"
+        except Exception:
+            volume_ratio, rd_ratio_str, cash_runway = 1.0, "Error", "Error"
+            ticker_q_values = {f"Rev_YoY_{q}": "" for q in sorted_quarters}
+
+        # 行データの組み立て
+        q_row_parts = [ticker_q_values[f"Rev_YoY_{q}"] for q in sorted_quarters]
+        
+        row = [
+            item.get("Theme"), ticker, item.get("Company_Name"), vc_layer, item.get("Market_Cap_M"), volume_ratio
+        ] + q_row_parts + [
+            rd_ratio_str, cash_runway, backlog_val, backlog_source, current_date
+        ]
+        updated_elite_rows.append(row)
+        time.sleep(0.5)
+
+    # 3. シートへの最終書き込み
+    try:
+        elite_ws = sh.worksheet(ELITE_SHEET_NAME)
+        elite_ws.clear()
+    except gspread.exceptions.WorksheetNotFound:
+        elite_ws = sh.add_worksheet(title=ELITE_SHEET_NAME, rows="1000", cols=str(len(final_headers)))
+        
+    elite_ws.update(range_name='A1', values=[final_headers])
+    if updated_elite_rows:
+        elite_ws.append_rows(updated_elite_rows)
+    print(f"🎉 テスト完了。先頭10銘柄での Elite_Watchlist 生成が正常終了しました！")
+
+if __name__ == "__main__":
+    main()
