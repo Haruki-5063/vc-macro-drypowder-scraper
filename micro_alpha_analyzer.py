@@ -65,53 +65,55 @@ def fetch_sec_raw_text(ticker):
         return ""
 
 def ask_gemini_sec_analysis(ticker, summary, sec_text):
-    """Gemini APIによるバリューチェーン・バックログ・スケウジュール構造化抽出"""
+    """Gemini APIによるバリューチェーン仕分け・バックログ（根拠テキスト付）の超高精度マイニング"""
     api_key = os.environ.get("GEMINI_API_KEY")
-    default_res = {"Value_Chain": "4_General", "backlog": "N/A", "backlog_source_text": "N/A", "schedule": "N/A"}
-    if not api_key: return default_res
+    default_res = {"Value_Chain": "4_General", "backlog": "N/A", "backlog_source_text": "N/A"}
+    if not api_key: 
+        return default_res
         
     client = genai.Client(api_key=api_key)
-    input_context = f"--- Business Summary ---\n{summary}\n\n--- SEC Latest Filing Text ---\n{sec_text}"
+    
+    # yfinance(事業概要)とSEC(10-Q/10-K)のインプットをドッキング
+    input_context = f"--- Business Summary (yfinance) ---\n{summary}\n\n--- SEC 10-Q/10-K Filing Text ---\n{sec_text}"
     
     prompt = f"""
 【背景・役割】
-あなたは冷静沈着なシニア財務アナリストです。与えられたファクト情報のみに基づいて、指定された企業のバリューチェーン分類、バックログ、スケジュールを抽出してください。
+あなたは冷静沈着で妥協を許さないシニア財務アナリストです。
+提供された以下の「ファクト情報」のみに基づいて、指定された企業のバリューチェーン分類、およびバックログ（受注残高）のマイニングを行ってください。独自の知識による推測や捏造は一切禁じます。
 
-1.Value_Chain
-【入力データ（一切の捏造を禁じるファクト）】
-1. 企業のコア事業概要 (yfinanceより提供): 
-   [ここに yfの longBusinessSummary を挿入]
+【対象企業のファクト情報】
+{input_context}
 
-2. 直近の適時開示テキスト (SEC 8-Kより提供): 
-   [ここに SECのテキスト を挿入]
-
-【バリューチェーン仕分けの厳格な境界線】
-提供された「事業概要」の文脈から、以下の3つのいずれかに【直接的な根拠】がある場合のみ分類してください。
-
-- "1_Upstream"：核燃料、ウラニウムや重要鉱物の採掘・精錬、基礎素材、または物理的なコア基盤技術を「直接提供・供給」している。
-- "2_Midstream"：ハードウェアコンポーネント、産業用装置（タービン、変圧器、半導体製造装置など）、衛星ペイロードなどの「製造・開発」を行っている。
+【1. Value_Chain 分類ルール】
+企業のコア事業概要 (yfinance) の文脈から、以下の3つのいずれかに【直接的かつ明らかな根拠】がある場合のみ分類してください。
+- "1_Upstream"：核燃料、ウラニウムや重要鉱物の採掘・精錬、基礎素材、または物理的なコア基盤技術を直接提供・供給している。
+- "2_Midstream"：ハードウェアコンポーネント、産業用装置（タービン、変圧器、半導体製造装置など）、衛星ペイロードなどの製造・開発を行っている。
 - "3_Downstream"：エンドユーザー向けサービス、電力網の運用・ユーティリティ、SaaS・ソフトウェアプラットフォームの提供、システムインテグレーションを行っている。
 
 ★重要：上記に明らかな根拠がない場合、または複数のレイヤーにまたがっていて判定が曖昧な場合は、絶対に無理に推測せず "4_General" と出力してください。
-2. Backlog Amount ("backlog", "backlog_source_text"):
-   - 以下のキーワード群（表記ブレ）に該当する、直近の「最新の総額（金額）」を特定してください。
-     [対象キーワード: "backlog", "Remaining Performance Obligations", "RPO", "contract backlog", "unfunded backlog", "backlog options"]
-   
-   - 【厳格な抽出ルール】
-     1. 過去（前年同期や前四半期）の数値ではなく、必ず「直近（As of [Latest Date]）」の数値を採用すること。
-     2. テキスト内に具体的な金額（例: $125M, $1.2B）の記載が【直接的】にある場合のみ抽出すること。
-     3. 「1つのセル用の金額（例: $120M）」を "backlog" に格納し、その金額が書かれていたテキストの該当箇所（前後1文を含む生の文章）を丸ごと "backlog_source_text" に格納してください。
-     
-   - 該当する記載が一切ない、または文脈から判断がつかない場合は、見栄を張らずに "backlog": "N/A", "backlog_source_text": "N/A" と出力してください。
-3. Upcoming Schedule ("schedule"): Extract timelines in concise Japanese bullet points ("• "). Keep technical proper nouns in English (e.g., "DOE", "SMR", "Qubit"). If not found, "N/A".
+
+【2. Backlog Amount 抽出ルール】
+SEC 10-Q/10-Kのテキストから、以下のキーワード群（表記ブレ）に該当する、直近の「最新の総額（金額）」を特定してください。
+[対象キーワード: "backlog", "Remaining Performance Obligations", "RPO", "contract backlog", "unfunded backlog"]
+
+★厳格な抽出ルール：
+1. 過去（前年同期や前四半期）の数値ではなく、必ず「直近（As of [Latest Date]）」の数値を採用すること。
+2. テキスト内に具体的な金額（例: $125M, $1.2B）の記載が【直接的】にある場合のみ抽出すること。
+3. 抽出した金額（例: $120M）を "backlog" に格納し、その金額が書かれていた箇所の生テキスト（前後1文を含む実際の文章）を丸ごと "backlog_source_text" に格納してください。
+4. 該当する記載が一切ない、または文脈から判断がつかない場合は、見栄を張らずに "backlog": "N/A", "backlog_source_text": "N/A" と出力してください。
 
 [Strict Constraints]
-- Output ONLY a valid JSON object matching this schema exactly: {{"Value_Chain": "...", "backlog": "...", "backlog_source_text" "schedule": "..."}}
+- Output ONLY a valid JSON object matching this schema exactly. Do not embed inside markdown wrappers:
+{{"Value_Chain": "...", "backlog": "...", "backlog_source_text": "..."}}
 """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash', contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", 
+                temperature=0.0
+            ),
         )
         return json.loads(response.text)
     except Exception:
