@@ -328,24 +328,17 @@ def main():
     print("🔄 2パス目：詳細データのマッピングを実行中...")
     for item in master_records:
         ticker = item.get("Ticker")
-        if not ticker or ticker not in stock_raw_financials: continue
-        
+        if not ticker or ticker not in stock_raw_financials:
+            continue
+
         stock, q_financials, q_balance = stock_raw_financials[ticker]
-        
-        print("🔄 2パス目：詳細データのマッピングを実行中...")
-    for item in master_records:
-        ticker = item.get("Ticker")
-        if not ticker or ticker not in stock_raw_financials: continue
-        
-        # 🟢 ここから差し替え
-        stock, q_financials, q_balance = stock_raw_financials[ticker]
-        
-        # 🌟 【修正】yfinanceのオブジェクトから直接生の事業概要を確実に引っこ抜く
+
+        # yfinanceのオブジェクトから直接生の事業概要を確実に引っこ抜く
         try:
             biz_summary = stock.info.get("longBusinessSummary", "")
         except Exception:
             biz_summary = ""
-        
+
         # AI記憶再利用
         has_past_data = ticker in existing_vc_map and existing_vc_map[ticker] != "" and "4_General" not in existing_vc_map[ticker]
         if has_past_data:
@@ -355,20 +348,15 @@ def main():
         else:
             print(f" ➔ 📡 {ticker}: 10-Q/10-K を正規索敵中...")
             sec_text = fetch_sec_clean_context(ticker)
-            
-            # 🌟 【修正】空のitemからではなく、確実に取得したbiz_summaryを注入
             ai_res = ask_gemini_sec_analysis(ticker, biz_summary, sec_text)
-            
             vc_layer = ai_res.get("Value_Chain", "4_General")
             backlog_val = ai_res.get("backlog", "N/A")
             backlog_source = ai_res.get("backlog_source_text", "N/A")
             time.sleep(0.3)
-        # 🟢 ここまで差し替え
 
-        # 財務計算
+        # 財務計算（ここから元のコードに綺麗に繋がります）
         try:
             history = stock.history(period="30d")
-            # （以下、財務計算ロジックへ続く...）
 
         # 財務計算
         try:
