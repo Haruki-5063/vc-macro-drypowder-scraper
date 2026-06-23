@@ -103,31 +103,50 @@ def notebooklm_style_cleaner(html_content: str) -> str:
 
     return text.strip()
 
-def extract_target_section(clean_text: str, keywords: list, window: int = 8000) -> str:
+def extract_target_section(clean_text: str, keywords: list, window: int = 2000, max_total_chars: int = 8000) -> str:
+    """
+    キーワード周辺を正確に切り出し、重複を完全に排除した上で、
+    最終的な合計文字数が max_total_chars を絶対に超えないように冷酷に制限する。
+    """
     text_lower = clean_text.lower()
     extracted_sections = []
-    found_positions = set()
+    
+    # 既に切り出したエリア（インデックスの開始〜終了）を記録して重複を完全ブロック
+    covered_ranges = []
 
     for keyword in keywords:
+        kw_lower = keyword.lower()
         pos = 0
         while True:
-            idx = text_lower.find(keyword.lower(), pos)
+            idx = text_lower.find(kw_lower, pos)
             if idx == -1:
                 break
 
-            is_duplicate = any(abs(idx - fp) < 3000 for fp in found_positions)
-            if not is_duplicate:
-                start = max(0, idx - 1500)
-                end = min(len(clean_text), idx + window)
-                extracted_sections.append(clean_text[start:end])
-                found_positions.add(idx)
-
-            pos = idx + 1
+            # 既にカバーしたエリアと被っているかチェック
+            is_overlapped = any(start <= idx <= end for start, end in covered_ranges)
+            
+            if not is_overlapped:
+                # キーワードの前後を切り出す（前方に少し余裕を持たせる）
+                start_pos = max(0, idx - 500)
+                end_pos = min(len(clean_text), idx + window)
+                
+                extracted_sections.append(clean_text[start_pos:end_pos])
+                covered_ranges.append((start_pos, end_pos))
+            
+            # 次の検索位置は、見つかったキーワードの直後からスタート（無限ループ・重複防止）
+            pos = idx + len(kw_lower)
 
     if not extracted_sections:
         return ""
 
-    return "\n\n--- [セクション区切り] ---\n\n".join(extracted_sections)
+    # セクションを結合
+    combined_text = "\n\n--- [Section] ---\n\n".join(extracted_sections)
+    
+    # 🌟 ここで冷酷に絶対値キャップをかける（数万文字になるのを物理的に阻止）
+    if len(combined_text) > max_total_chars:
+        combined_text = combined_text[:max_total_chars] + "\n... [Text truncated due to length limit] ..."
+
+    return combined_text
 
 def fetch_sec_clean_context(ticker: str) -> str:
     """
@@ -178,9 +197,10 @@ def fetch_sec_clean_context(ticker: str) -> str:
             "backlog", "Remaining Performance Obligations", "RPO", 
             "contract backlog", "unfunded backlog"
         ]
-        final_context = extract_target_section(cleaned_all_text, backlog_keywords, window=8000)
+        # 🌟 windowサイズを2000文字に絞り、全体の合計を最大8000文字に制限
+        final_context = extract_target_section(cleaned_all_text, backlog_keywords, window=2000, max_total_chars=8000)
         
-        print(f"   [DEBUG] {ticker}: SECから抽出された文字数 = {len(final_context)}文字 (キーワードヒット数チェック)")
+        print(f"   [DEBUG] {ticker}: SECから抽出された文字数 = {len(final_context)}文字 (絶対キャップ適用済)")
         
         return final_context
         
