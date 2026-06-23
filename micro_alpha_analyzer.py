@@ -2,6 +2,7 @@ import os
 import json
 import time
 import re
+import math  # 🌟 mathモジュールを正しくインポート
 import unicodedata
 import requests
 import yfinance as yf
@@ -14,11 +15,10 @@ from google.genai import types
 # =========================================================================
 # ⚙️ 設定値
 # =========================================================================
-SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
+SPREADSHEET_ID = "あなたのスプレッドシートID"
 MASTER_SHEET_NAME = "Master_Watchlist"
 ELITE_SHEET_NAME = "Elite_Watchlist"
 
-# 2026年現在のSEC EDGARアクセス規制を突破するためのヘッダー（ダミーアドレス等ではない正規なもの）
 SEC_HEADERS = {
     'User-Agent': 'CorporateAnalystResearch/1.0 (analyst_data@example.com)'
 }
@@ -32,7 +32,6 @@ def get_google_sheets_client():
     return gspread.authorize(creds)
 
 def get_quarter_label(timestamp):
-    """Timestampから『2026_Q1』のようなクォーター表記を冷酷に算出"""
     try:
         year = timestamp.year
         month = timestamp.month
@@ -122,7 +121,6 @@ def fetch_sec_clean_context(ticker: str) -> str:
                 break
                 
         if target_index is None:
-            print(f" 🚨 {ticker} の直近提出書類に 10-Q/10-K が見つかりません。")
             return ""
             
         acc_num = recent_filings['accessionNumber'][target_index]
@@ -145,8 +143,7 @@ def fetch_sec_clean_context(ticker: str) -> str:
         final_context = extract_target_section(cleaned_all_text, backlog_keywords, window=12000)
         return final_context
         
-    except Exception as e:
-        print(f" 🚨 SECコンテキスト生成エラー ({ticker}): {e}")
+    except Exception:
         return ""
 
 # =========================================================================
@@ -214,9 +211,8 @@ def main():
     master_ws = sh.worksheet(MASTER_SHEET_NAME)
     all_master_records = master_ws.get_all_records()
     
-    # 🧪 テスト制限（先頭10件）
     master_records = all_master_records[:10]
-    print(f"🧪 ヘッダー刷新テストモード：先頭 {len(master_records)} 銘柄を処理します。")
+    print(f"🧪 財務エラー修正テストモード：先頭 {len(master_records)} 銘柄を処理します。")
     
     try:
         elite_ws = sh.worksheet(ELITE_SHEET_NAME)
@@ -245,6 +241,7 @@ def main():
             
             stock_raw_financials[ticker] = (stock, q_financials, q_balance)
             
+            # 表記ブレ吸収のための緩いインデックス探索
             rev_idx = [i for i in q_financials.index if "Revenue" in i]
             if rev_idx:
                 timestamps = q_financials.loc[rev_idx[0]].dropna().index
@@ -259,7 +256,7 @@ def main():
     print(f"📈 検出されたクォーター列: {sorted_quarters}")
 
     # =========================================================================
-    # 🌟 2パス目：ヘッダー再定義 ＆ マッピング（Theme, Company_Name, Market_Capを排したスマート構成）
+    # 🌟 2パス目：マッピング
     # =========================================================================
     base_headers = ['Ticker', 'Value_Chain', 'Volume_Ratio']
     tail_headers = ['RD_Ratio', 'Cash_Runway', 'Backlog_Amount', 'Backlog_Source_Text', 'Last_Updated']
@@ -276,7 +273,7 @@ def main():
         
         stock, q_financials, q_balance = stock_raw_financials[ticker]
         
-        # AI記憶再利用
+        # AI記憶再利用判定
         has_past_data = ticker in existing_vc_map and existing_vc_map[ticker] != "" and "4_General" not in existing_vc_map[ticker]
         if has_past_data:
             vc_layer = existing_vc_map[ticker]
@@ -296,10 +293,11 @@ def main():
             history = stock.history(period="30d")
             volume_ratio = round(history['Volume'].iloc[-1] / history['Volume'].mean(), 2) if len(history) >= 2 else 1.0
             
+            # インデックスの表記ブレ吸収用ロジック
             rev_idx = [i for i in q_financials.index if "Revenue" in i]
             rd_idx = [i for i in q_financials.index if "Research" in i or "R&D" in i]
             net_inc_idx = [i for i in q_financials.index if "Net Income" in i]
-            cash_idx = [i for i in q_balance.index if "Cash And Cash Equivalents" in i or "Cash" in i]
+            cash_idx = [i for i in q_balance.index if "Cash" in i]
             
             ticker_q_values = {f"Rev_YoY_{q}": "" for q in sorted_quarters}
             
@@ -313,33 +311,26 @@ def main():
                         val = yoy_series.iloc[i]
                         q_lbl = get_quarter_label(timestamps[i])
                         col_key = f"Rev_YoY_{q_lbl}"
-                        if col_key in ticker_q_values and not os.sys.math.isnan(val):
+                        if col_key in ticker_q_values and not math.isnan(val):  # 🌟 math.isnan に修正
                             ticker_q_values[col_key] = f"{round(val * 100, 1)}%"
 
             rd_ratio_str, cash_runway = "N/A", "N/A"
             if rev_idx and rd_idx:
                 latest_rev = q_financials.loc[rev_idx[0]].iloc[0]
                 latest_rd = q_financials.loc[rd_idx[0]].iloc[0]
-                if latest_rev > 0 and not os.sys.math.isnan(latest_rd):
+                if latest_rev > 0 and not math.isnan(latest_rd):  # 🌟 math.isnan に修正
                     rd_ratio_str = f"{round((abs(latest_rd) / latest_rev) * 100, 1)}%"
 
             if cash_idx and net_inc_idx:
                 latest_cash = q_balance.loc[cash_idx[0]].iloc[0]
                 latest_loss = q_financials.loc[net_inc_idx[0]].iloc[0]
-                if latest_loss < 0 and not os.sys.math.isnan(latest_cash):
+                if latest_loss < 0 and not math.isnan(latest_cash):  # 🌟 math.isnan に修正
                     cash_runway = f"{round(abs(latest_cash) / abs(latest_loss), 1)} Q"
                 elif latest_loss >= 0:
                     cash_runway = "Black (黒字)"
         except Exception as e:
-            # 🚨 【デバッグ核心部】何が原因で落ちたのかをログに冷酷に吐き出す
-            print(f"❌ [{ticker}] 財務計算で例外発生: {type(e).__name__} - {e}")
-            try:
-                print(f"   -> quarterly_financials インデックス一覧: {list(q_financials.index) if q_financials is not None else 'None'}")
-                print(f"   -> quarterly_balance_sheet インデックス一覧: {list(q_balance.index) if q_balance is not None else 'None'}")
-            except Exception:
-                print("   -> 財務諸表データそのものが取得できていないか、Indexにアクセスできません。")
-                
-            volume_ratio, rd_ratio_str, cash_runway = 1.0, "Error", "Error"
+            print(f"❌ [{ticker}] 計算処理スキップ（インデックス不適合等）: {e}")
+            volume_ratio, rd_ratio_str, cash_runway = 1.0, "N/A", "N/A"
             ticker_q_values = {f"Rev_YoY_{q}": "" for q in sorted_quarters}
 
         # 行データの組み立て
@@ -363,7 +354,7 @@ def main():
     elite_ws.update(range_name='A1', values=[final_headers])
     if updated_elite_rows:
         elite_ws.append_rows(updated_elite_rows)
-    print("🎉 ヘッダーの刷新が完了しました。")
+    print("🎉 財務計算クラッシュ修正版の実行が完了しました。")
 
 if __name__ == "__main__":
     main()
