@@ -1,11 +1,8 @@
 name: Run Micro Alpha Analyzer
 
 on:
-  # 1. 毎日決まった時間（例: 日本時間 朝9:00 / UTC 0:00）に定期自動実行したい場合
   schedule:
     - cron: '0 0 * * *'
-  
-  # 2. GitHubの画面からいつでもボタンポチで手動実行したい場合
   workflow_dispatch:
 
 jobs:
@@ -20,7 +17,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip' # 依存ライブラリのキャッシュを有効化して高速化
+        # cache: 'pip'  <-- エラーの原因であるこの行を冷酷に削除
 
     - name: Install Dependencies
       run: |
@@ -29,18 +26,14 @@ jobs:
 
     - name: Run Script
       env:
-        # GitHub Secretsから安全に環境変数を注入
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: |
-        # スクリプト内の SPREADSHEET_ID を環境変数から動的に置換して実行
         python -c "
         with open('micro_alpha_analyzer.py', 'r') as f:
             code = f.read()
-        # コード内のプレースホルダーをSecretsの値に書き換える
         code = code.replace('あなたのスプレッドシートID', '${{ secrets.SPREADSHEET_ID }}')
         with open('micro_alpha_analyzer_run.py', 'w') as f:
             f.write(code)
         "
-        # 実行
         python micro_alpha_analyzer_run.py
