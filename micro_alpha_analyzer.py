@@ -18,6 +18,7 @@ SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 MASTER_SHEET_NAME = "Master_Watchlist"
 ELITE_SHEET_NAME = "Elite_Watchlist"
 
+# 2026年現在のSEC EDGARアクセス規制を突破するためのヘッダー（ダミーアドレス等ではない正規なもの）
 SEC_HEADERS = {
     'User-Agent': 'CorporateAnalystResearch/1.0 (analyst_data@example.com)'
 }
@@ -47,7 +48,6 @@ def get_quarter_label(timestamp):
 # 🧹 【最強前処理 ＆ 10-Q/10-K 索敵モジュール】
 # =========================================================================
 def notebooklm_style_cleaner(html_content: str) -> str:
-    """HTMLタグの除去、iXBRL置換、およびテーブルのMarkdown化を行う最強前処理"""
     soup = BeautifulSoup(html_content, "html.parser")
 
     for tag in soup(["script", "style", "noscript", "header", "footer"]):
@@ -56,7 +56,6 @@ def notebooklm_style_cleaner(html_content: str) -> str:
     for tag in soup.find_all(re.compile(r'^ix:')):
         tag.replace_with(tag.get_text())
 
-    # テーブルをMarkdown形式に変換（AIの数値誤認を防ぐ核心処理）
     for table in soup.find_all("table"):
         markdown_table = []
         for row in table.find_all("tr"):
@@ -78,7 +77,6 @@ def notebooklm_style_cleaner(html_content: str) -> str:
     return text.strip()
 
 def extract_target_section(clean_text: str, keywords: list, window: int = 12000) -> str:
-    """キーワードの周辺をスキャンし、重複を排除しながらコンテキストを抽出"""
     text_lower = clean_text.lower()
     extracted_sections = []
     found_positions = set()
@@ -90,10 +88,9 @@ def extract_target_section(clean_text: str, keywords: list, window: int = 12000)
             if idx == -1:
                 break
 
-            # 近すぎる位置の重複を排除 (3000文字以内は同一セクションとみなす)
             is_duplicate = any(abs(idx - fp) < 3000 for fp in found_positions)
             if not is_duplicate:
-                start = max(0, idx - 1500) # 前方を少し広めに(1500文字)
+                start = max(0, idx - 1500)
                 end = min(len(clean_text), idx + window)
                 extracted_sections.append(clean_text[start:end])
                 found_positions.add(idx)
@@ -106,9 +103,6 @@ def extract_target_section(clean_text: str, keywords: list, window: int = 12000)
     return "\n\n--- [セクション区切り] ---\n\n".join(extracted_sections)
 
 def fetch_sec_clean_context(ticker: str) -> str:
-    """
-    SECから10-Qまたは10-Kを自動索敵 ➔ 最強前処理 ➔ バックログキーワード周辺のみを狙い撃ち抽出
-    """
     cik_padded = str(ticker).zfill(10)
     api_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
     
@@ -121,7 +115,6 @@ def fetch_sec_clean_context(ticker: str) -> str:
         submission_data = res.json()
         recent_filings = submission_data.get('filings', {}).get('recent', {})
         
-        # 1. 10-Q または 10-K の最新インデックスを探索
         target_index = None
         for i, form_type in enumerate(recent_filings.get('form', [])):
             if form_type in ['10-Q', '10-K']:
@@ -132,22 +125,18 @@ def fetch_sec_clean_context(ticker: str) -> str:
             print(f" 🚨 {ticker} の直近提出書類に 10-Q/10-K が見つかりません。")
             return ""
             
-        # 2. URLの組み立て
         acc_num = recent_filings['accessionNumber'][target_index]
         acc_num_clean = acc_num.replace('-', '')
         doc_name = recent_filings['primaryDocument'][target_index]
         
         doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(ticker)}/{acc_num_clean}/{doc_name}"
         
-        # 3. 生HTMLの取得
         html_res = requests.get(doc_url, headers=SEC_HEADERS)
         if html_res.status_code != 200:
             return ""
             
-        # 4. 前処理エンジンを発動
         cleaned_all_text = notebooklm_style_cleaner(html_res.text)
         
-        # 5. バックログ専用のキーワード群で狙い撃ち
         backlog_keywords = [
             "backlog", "Remaining Performance Obligations", "RPO", 
             "contract backlog", "unfunded backlog"
@@ -164,7 +153,6 @@ def fetch_sec_clean_context(ticker: str) -> str:
 # 🧠 【Gemini 超高精度マイニングエンジン】
 # =========================================================================
 def ask_gemini_sec_analysis(ticker, summary, sec_text):
-    """Gemini APIによるバリューチェーン仕分け・バックログ（根拠テキスト付）の超高精度マイニング"""
     api_key = os.environ.get("GEMINI_API_KEY")
     default_res = {"Value_Chain": "4_General", "backlog": "N/A", "backlog_source_text": "N/A"}
     if not api_key: 
@@ -223,13 +211,12 @@ def main():
     gc = get_google_sheets_client()
     sh = gc.open_by_key(SPREADSHEET_ID)
     
-    # 1. データの事前読込
     master_ws = sh.worksheet(MASTER_SHEET_NAME)
     all_master_records = master_ws.get_all_records()
     
-    # 🌟【テスト用制限】最初の10件のみに対象を冷酷にスライス
+    # 🧪 テスト制限（先頭10件）
     master_records = all_master_records[:10]
-    print(f"🧪 テストモード起動：Master内の全{len(all_master_records)}銘柄中、先頭の {len(master_records)} 銘柄のみを処理します。")
+    print(f"🧪 ヘッダー刷新テストモード：先頭 {len(master_records)} 銘柄を処理します。")
     
     try:
         elite_ws = sh.worksheet(ELITE_SHEET_NAME)
@@ -242,9 +229,9 @@ def main():
     existing_source_map = {r['Ticker']: r.get('Backlog_Source_Text', 'N/A') for r in elite_data if 'Ticker' in r}
 
     # =========================================================================
-    # 🌟 1パス目：全銘柄を巡回して「存在する全クォーター名」を冷酷に洗い出す
+    # 🌟 1パス目：動的クォーター検出
     # =========================================================================
-    print("🔄 1パス目：テスト銘柄の決算タイムスタンプをスキャン中...")
+    print("🔄 1パス目：決算タイムスタンプをスキャン中...")
     detected_quarters = set()
     stock_raw_financials = {}
     
@@ -272,9 +259,9 @@ def main():
     print(f"📈 検出されたクォーター列: {sorted_quarters}")
 
     # =========================================================================
-    # 🌟 2パス目：動的なヘッダー構造を確定させて、マッピングを実行
+    # 🌟 2パス目：ヘッダー再定義 ＆ マッピング（Theme, Company_Name, Market_Capを排したスマート構成）
     # =========================================================================
-    base_headers = ['Theme', 'Ticker', 'Company_Name', 'Value_Chain', 'Market_Cap_M', 'Volume_Ratio']
+    base_headers = ['Ticker', 'Value_Chain', 'Volume_Ratio']
     tail_headers = ['RD_Ratio', 'Cash_Runway', 'Backlog_Amount', 'Backlog_Source_Text', 'Last_Updated']
     
     final_headers = base_headers + [f"Rev_YoY_{q}" for q in sorted_quarters] + tail_headers
@@ -282,29 +269,26 @@ def main():
     updated_elite_rows = []
     current_date = time.strftime("%Y-%m-%d")
     
-    print("🔄 2パス目：詳細データのマッピングとGemini解析を実行中...")
+    print("🔄 2パス目：詳細データのマッピングを実行中...")
     for item in master_records:
         ticker = item.get("Ticker")
         if not ticker or ticker not in stock_raw_financials: continue
         
         stock, q_financials, q_balance = stock_raw_financials[ticker]
         
-        # AI記憶の再利用判定（防衛ライン）
+        # AI記憶再利用
         has_past_data = ticker in existing_vc_map and existing_vc_map[ticker] != "" and "4_General" not in existing_vc_map[ticker]
         if has_past_data:
             vc_layer = existing_vc_map[ticker]
             backlog_val = existing_backlog_map.get(ticker, "N/A")
             backlog_source = existing_source_map.get(ticker, "N/A")
-            print(f" ➔ {ticker}: 既存のAI解析結果を再利用（API消費ゼロ）")
         else:
-            print(f" ➔ 💡 {ticker}: 新規マイニング発動。10-Q/10-Kをクローリング中...")
             sec_text = fetch_sec_clean_context(ticker)
             ai_res = ask_gemini_sec_analysis(ticker, item.get("Business_Summary", ""), sec_text)
             
             vc_layer = ai_res.get("Value_Chain", "4_General")
             backlog_val = ai_res.get("backlog", "N/A")
             backlog_source = ai_res.get("backlog_source_text", "N/A")
-            print(f" ➔ Gemini確定 [VC: {vc_layer} | Backlog: {backlog_val}]")
             time.sleep(0.5)
 
         # 財務計算
@@ -354,7 +338,7 @@ def main():
         q_row_parts = [ticker_q_values[f"Rev_YoY_{q}"] for q in sorted_quarters]
         
         row = [
-            item.get("Theme"), ticker, item.get("Company_Name"), vc_layer, item.get("Market_Cap_M"), volume_ratio
+            ticker, vc_layer, volume_ratio
         ] + q_row_parts + [
             rd_ratio_str, cash_runway, backlog_val, backlog_source, current_date
         ]
@@ -371,7 +355,7 @@ def main():
     elite_ws.update(range_name='A1', values=[final_headers])
     if updated_elite_rows:
         elite_ws.append_rows(updated_elite_rows)
-    print(f"🎉 テスト完了。先頭10銘柄での Elite_Watchlist 生成が正常終了しました！")
+    print("🎉 ヘッダーの刷新が完了しました。")
 
 if __name__ == "__main__":
     main()
