@@ -39,7 +39,7 @@ def get_quarter_label(timestamp):
         return None
 
 def fetch_sec_raw_text(ticker):
-    """SEC EDGARから対象企業の直近8-Kテキストを取得"""
+    """SEC EDGARから対象企業の直近の【10-Q】または【10-K】テキストを取得"""
     try:
         cik_url = f"https://data.sec.gov/submissions/CIK{ticker.zfill(10)}.json"
         res = requests.get(cik_url, headers=SEC_HEADERS)
@@ -47,12 +47,19 @@ def fetch_sec_raw_text(ticker):
         
         data = res.json()
         recent_filings = data.get("filings", {}).get("recent", {})
+        
+        # 直近の提出書類を上から順にスキャン
         for i, form_type in enumerate(recent_filings.get("form", [])):
-            if form_type == "8-K":
+            # 🌟 10-Q（四半期）または 10-K（通期）のいずれか最新のものをターゲットにする
+            if form_type in ["10-Q", "10-K"]:
                 accession = recent_filings.get("accessionNumber", [])[i].replace("-", "")
                 doc_name = recent_filings.get("primaryDocument", [])[i]
+                
                 text_url = f"https://www.sec.gov/Archives/edgar/data/{data['cik']}/{accession}/{doc_name}"
-                return requests.get(text_url, headers=SEC_HEADERS).text[:40000]
+                raw_html = requests.get(text_url, headers=SEC_HEADERS).text
+                
+                # 💡 次のステップで、この raw_html に BeautifulSoup の前処理を噛ませます
+                return raw_html
         return ""
     except Exception:
         return ""
