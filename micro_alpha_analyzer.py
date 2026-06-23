@@ -14,7 +14,7 @@ from google.genai import types
 # =========================================================================
 # ⚙️ 設定値
 # =========================================================================
-SPREADSHEET_ID = "あなたのスプレッドシートID"
+SPREADSHEET_ID = "1u3HtebzKnq2zmXDDnZq7OslCbgcnpXPPkD8LQbCvMQM"
 MASTER_SHEET_NAME = "Master_Watchlist"
 ELITE_SHEET_NAME = "Elite_Watchlist"
 
