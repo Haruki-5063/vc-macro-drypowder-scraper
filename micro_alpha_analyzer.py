@@ -328,8 +328,8 @@ def main():
     master_ws = sh.worksheet(MASTER_SHEET_NAME)
     all_master_records = master_ws.get_all_records()
     
-    master_records = all_master_records[:10]
-    print(f"🧪 完全統合デバッグモード：先頭 {len(master_records)} 銘柄を処理します。")
+    master_records = all_master_records
+    print(f"🚀 本番稼働：全 {len(master_records)} 銘柄のスキャンを開始します。")
     
     try:
         elite_ws = sh.worksheet(ELITE_SHEET_NAME)
